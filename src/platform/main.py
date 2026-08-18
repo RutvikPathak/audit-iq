@@ -1,14 +1,55 @@
-from fastapi import FastAPI
+from dotenv import load_dotenv
+load_dotenv()  # <-- Add this right at the top
 
-from src.schemas.audit import AuditRequest, AuditResponse
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from typing import Optional, List
 
-app = FastAPI()
+from src.agent.graph import graph
+from src.schemas.audit import AuditReport
 
+app = FastAPI(
+    title="AuditIQ Agent API",
+    description="Production API for AuditIQ LangGraph extraction and validation engine",
+    version="1.0.0"
+)
+
+# 1. Unified Request & Response Schemas
+class AuditRequest(BaseModel):
+    raw_text: str = Field(
+        ...,
+        description="Raw financial report or transcript text to audit",
+        example="Acme Corp Q3 2025: Total revenue reached $14.5M USD, EBITDA was $3.2M USD. All regulatory checks met."
+    )
+
+class AuditResponse(BaseModel):
+    status: str
+    extracted_report: Optional[AuditReport] = None
+    validation_errors: List[str] = []
+
+# 2. Endpoints
+@app.get("/health")
+def healthcheck():
+    return {"status": "healthy", "service": "AuditIQ Platform"}
 
 @app.post("/api/v1/audit", response_model=AuditResponse)
 def audit(request: AuditRequest):
-    return AuditResponse(
-        status="completed",
-        answer="This is a mock audit response.",
-        confidence=0.95,
-    )
+    initial_state = {
+        "raw_text": request.raw_text,
+        "extracted_report": None,
+        "validation_errors": [],
+        "status": "STARTING"
+    }
+
+    try:
+        result = graph.invoke(initial_state)
+        return AuditResponse(
+            status=result.get("status", "UNKNOWN"),
+            extracted_report=result.get("extracted_report"),
+            validation_errors=result.get("validation_errors", [])
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Agent execution error: {str(e)}"
+        )

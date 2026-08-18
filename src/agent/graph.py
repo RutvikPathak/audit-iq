@@ -17,13 +17,13 @@ class AuditState(TypedDict):
     validation_errors: List[str]
     status: str
 
-# 3. Initialize Groq with Llama 3.3 70B
-llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0)
+# 3. Initialize Groq with GPT-OSS 120B (Native Tool Calling)
+llm = ChatGroq(model_name="openai/gpt-oss-120b", temperature=0)
 structured_llm = llm.with_structured_output(AuditReport)
 
 def extractor_node(state: AuditState) -> dict:
-    print("\n--- [Node 1: Extractor] Parsing Raw Text with Groq (Llama 3.3) ---")
-    prompt = f"Audit the following text and extract structured metrics:\n\n{state['raw_text']}"
+    print("\n--- [Node 1: Extractor] Parsing Raw Text with Groq ---")
+    prompt = f"Extract the audit report metrics from the following text:\n\n{state['raw_text']}"
     
     try:
         report: AuditReport = structured_llm.invoke(prompt)
