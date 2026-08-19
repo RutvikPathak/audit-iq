@@ -1,4 +1,5 @@
 services:
+
   qdrant:
     image: qdrant/qdrant:latest
     container_name: audit-iq-qdrant
@@ -7,6 +8,21 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: audit-iq-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: audit_documents
+    depends_on:
+      - qdrant
 
 volumes:
   qdrant_storage:

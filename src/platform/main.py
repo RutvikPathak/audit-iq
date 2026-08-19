@@ -1,117 +1,197 @@
 import io
+import os
+
 from dotenv import load_dotenv
 
-# Load environment variables (GROQ_API_KEY)
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import Optional, List
 from pypdf import PdfReader
+from groq import Groq
 
-from src.agent.graph import graph
-from src.schemas.audit import AuditReport
-
-# --- 1. Initialize App ---
-app = FastAPI(
-    title="AuditIQ Agent API",
-    description="Production API for AuditIQ LangGraph extraction and validation engine",
-    version="1.0.0"
+from src.schemas.audit import AuditRequest, AuditResponse
+from src.platform.vector_store import (
+    index_document,
+    search_document,
 )
 
-# --- 2. Enable CORS Middleware ---
+
+app = FastAPI(
+    title="AuditIQ Agent API",
+    description="AuditIQ RAG and audit intelligence platform",
+    version="2.0.0",
+)
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins for local dev / frontend integration
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- 3. Request & Response Schemas ---
-class AuditRequest(BaseModel):
-    raw_text: str = Field(
-        ...,
-        description="Raw financial report or transcript text to audit",
-        example="Acme Corp Q3 2025: Total revenue reached $14.5M USD, EBITDA was $3.2M USD. All regulatory checks met."
-    )
 
-class AuditResponse(BaseModel):
-    status: str
-    extracted_report: Optional[AuditReport] = None
-    validation_errors: List[str] = []
-
-# --- 4. Healthcheck Endpoint ---
 @app.get("/health")
 def healthcheck():
-    return {"status": "healthy", "service": "AuditIQ Platform"}
-
-# --- 5. Raw Text Audit Endpoint ---
-@app.post("/api/v1/audit", response_model=AuditResponse)
-def audit_raw_text(request: AuditRequest):
-    """Audits raw text passed directly via JSON payload."""
-    initial_state = {
-        "raw_text": request.raw_text,
-        "extracted_report": None,
-        "validation_errors": [],
-        "status": "STARTING"
+    return {
+        "status": "healthy",
+        "service": "AuditIQ Platform",
     }
 
-    try:
-        result = graph.invoke(initial_state)
-        return AuditResponse(
-            status=result.get("status", "UNKNOWN"),
-            extracted_report=result.get("extracted_report"),
-            validation_errors=result.get("validation_errors", [])
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Agent execution error: {str(e)}"
-        )
 
-# --- 6. PDF File Upload Audit Endpoint ---
-@app.post("/api/v1/audit/upload", response_model=AuditResponse)
-async def audit_pdf_upload(file: UploadFile = File(...)):
-    """Uploads a PDF financial report, extracts text in memory, and runs the audit agent."""
+@app.post("/api/v1/documents/{document_id}/index")
+async def index_document_endpoint(
+    document_id: str,
+    file: UploadFile = File(...),
+):
+    """
+    Upload and index a PDF document into Qdrant.
+    """
+
     if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .pdf file.")
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are supported.",
+        )
 
     try:
-        # Read file contents into memory
         contents = await file.read()
-        pdf_reader = PdfReader(io.BytesIO(contents))
+
+        pdf_reader = PdfReader(
+            io.BytesIO(contents)
+        )
+
         extracted_text = ""
 
         for page in pdf_reader.pages:
             page_text = page.extract_text()
+
             if page_text:
                 extracted_text += page_text + "\n"
 
         if not extracted_text.strip():
             raise HTTPException(
                 status_code=400,
-                detail="Could not extract readable text from the uploaded PDF. It may be scanned or empty."
+                detail="Could not extract readable text from PDF.",
             )
 
-        initial_state = {
-            "raw_text": extracted_text,
-            "extracted_report": None,
-            "validation_errors": [],
-            "status": "STARTING"
+        chunk_count = index_document(
+            document_id=document_id,
+            text=extracted_text,
+        )
+
+        return {
+            "status": "indexed",
+            "document_id": document_id,
+            "chunks_indexed": chunk_count,
         }
 
-        result = graph.invoke(initial_state)
-        return AuditResponse(
-            status=result.get("status", "UNKNOWN"),
-            extracted_report=result.get("extracted_report"),
-            validation_errors=result.get("validation_errors", [])
-        )
     except HTTPException:
         raise
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"PDF ingestion/audit error: {str(e)}"
+            detail=f"Document indexing error: {str(e)}",
+        )
+
+
+@app.post(
+    "/api/v1/audit",
+    response_model=AuditResponse,
+)
+async def run_audit(request: AuditRequest):
+    """
+    Retrieve relevant document context from Qdrant
+    and generate an answer to the user's question.
+    """
+
+    try:
+        results = search_document(
+            document_id=request.document_id,
+            question=request.question,
+            limit=5,
+        )
+
+        if not results:
+            return AuditResponse(
+                status="no_context",
+                answer="No relevant information was found for this document.",
+                confidence=0.0,
+            )
+
+        context = "\n\n".join(
+            result["text"]
+            for result in results
+        )
+
+        average_score = sum(
+            result["score"]
+            for result in results
+        ) / len(results)
+
+        # Clamp similarity score to a sensible 0-1 range.
+        confidence = max(
+            0.0,
+            min(1.0, average_score),
+        )
+
+        groq_api_key = os.getenv("GROQ_API_KEY")
+
+        if not groq_api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="GROQ_API_KEY is not configured.",
+            )
+
+        client = Groq(
+            api_key=groq_api_key
+        )
+
+        prompt = f"""
+You are an enterprise audit assistant.
+
+Answer the user's question using ONLY the provided
+document context.
+
+If the answer cannot be found in the context,
+say that the information is not available.
+
+Document context:
+{context}
+
+Question:
+{request.question}
+
+Provide a concise and factual answer.
+"""
+
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            temperature=0,
+        )
+
+        answer = completion.choices[0].message.content
+
+        return AuditResponse(
+            status="success",
+            answer=answer,
+            confidence=round(confidence, 3),
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Q&A execution error: {str(e)}",
         )
