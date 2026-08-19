@@ -1,3 +1,4 @@
+import json
 import streamlit as st
 import requests
 import pandas as pd
@@ -100,7 +101,7 @@ with tab_audit:
                         
                         st.divider()
                         
-                        # Dynamic Metrics Handling (handles lists and dicts safely)
+                        # Extracted Metrics Display
                         st.markdown("### Extracted Financial Metrics")
                         raw_metrics = report.get("metrics", [])
                         metrics_list = []
@@ -124,6 +125,28 @@ with tab_audit:
                             st.markdown("#### Itemized Metric Breakdown")
                             df = pd.DataFrame(metrics_list)
                             st.dataframe(df, use_container_width=True)
+                            
+                            # Export Actions
+                            st.markdown("#### 📥 Export Audit Results")
+                            exp_col1, exp_col2 = st.columns(2)
+                            with exp_col1:
+                                csv_data = df.to_csv(index=False).encode('utf-8')
+                                st.download_button(
+                                    label="📄 Download Metrics (CSV)",
+                                    data=csv_data,
+                                    file_name=f"{report.get('company_name', 'audit').lower().replace(' ', '_')}_metrics.csv",
+                                    mime="text/csv",
+                                    use_container_width=True
+                                )
+                            with exp_col2:
+                                json_data = json.dumps(data, indent=2).encode('utf-8')
+                                st.download_button(
+                                    label="📑 Download Full Verdict (JSON)",
+                                    data=json_data,
+                                    file_name=f"{report.get('company_name', 'audit').lower().replace(' ', '_')}_audit_verdict.json",
+                                    mime="application/json",
+                                    use_container_width=True
+                                )
                         else:
                             st.info("No numerical metrics extracted.")
                             
