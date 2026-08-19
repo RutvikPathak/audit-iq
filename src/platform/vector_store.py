@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import List, Dict, Any
 
 from qdrant_client import QdrantClient
@@ -9,19 +10,21 @@ from qdrant_client.models import (
 )
 from fastembed import TextEmbedding
 
-
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_URL = os.getenv("QDRANT_URL")
 COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "audit_documents")
 
-# Small, efficient embedding model suitable for local development.
+# Initialize Embedding Model
 EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
 
-embedding_model = TextEmbedding(
-    model_name=EMBEDDING_MODEL_NAME
-)
-
-qdrant_client = QdrantClient(url=QDRANT_URL)
-
+# Initialize Qdrant: Uses URL if Docker is running, otherwise runs locally in ./qdrant_db
+if QDRANT_URL and QDRANT_URL.startswith("http"):
+    try:
+        qdrant_client = QdrantClient(url=QDRANT_URL, timeout=3)
+    except Exception:
+        qdrant_client = QdrantClient(path="./qdrant_db")
+else:
+    qdrant_client = QdrantClient(path="./qdrant_db")
 
 def chunk_text(
     text: str,
@@ -125,7 +128,7 @@ def index_document(
 
         points.append(
             PointStruct(
-                id=f"{document_id}-{index}",
+                id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}_{index}")),
                 vector=vector,
                 payload={
                     "document_id": document_id,

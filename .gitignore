@@ -37,3 +37,13 @@ data/*
 __pycache__/
 *.pyc
 .env
+
+# Local Vector DB & Caches
+qdrant_db/
+.pytest_cache/
+__pycache__/
+
+# Test artifacts
+sample_clean.pdf
+sample_flagged.pdf
+create_test_pdfs.py
