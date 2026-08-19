@@ -7,6 +7,9 @@ from qdrant_client.models import (
     Distance,
     PointStruct,
     VectorParams,
+    Filter,
+    FieldCondition,
+    MatchValue,
 )
 from fastembed import TextEmbedding
 
@@ -17,7 +20,7 @@ COLLECTION_NAME = os.getenv("QDRANT_COLLECTION", "audit_documents")
 EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
 
-# Initialize Qdrant: Uses URL if Docker is running, otherwise runs locally in ./qdrant_db
+# Initialize Qdrant Client (URL or Embedded Local Storage)
 if QDRANT_URL and QDRANT_URL.startswith("http"):
     try:
         qdrant_client = QdrantClient(url=QDRANT_URL, timeout=3)
@@ -26,20 +29,17 @@ if QDRANT_URL and QDRANT_URL.startswith("http"):
 else:
     qdrant_client = QdrantClient(path="./qdrant_db")
 
+
 def chunk_text(
     text: str,
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
 ) -> List[str]:
-    """
-    Split large audit documents into overlapping text chunks.
-    """
-
+    """Split large audit documents into overlapping text chunks."""
     if not text or not text.strip():
         return []
 
     text = text.strip()
-
     chunks = []
     start = 0
 
@@ -59,28 +59,15 @@ def chunk_text(
 
 
 def _get_embedding(text: str) -> List[float]:
-    """
-    Generate an embedding for a single piece of text.
-    """
-
-    embeddings = list(
-        embedding_model.embed([text])
-    )
-
+    """Generate an embedding for a single piece of text."""
+    embeddings = list(embedding_model.embed([text]))
     return embeddings[0].tolist()
 
 
 def _ensure_collection() -> None:
-    """
-    Create the Qdrant collection if it does not already exist.
-    """
-
+    """Create the Qdrant collection if it does not already exist."""
     collections = qdrant_client.get_collections()
-
-    existing_names = {
-        collection.name
-        for collection in collections.collections
-    }
+    existing_names = [c.name for c in collections.collections]
 
     if COLLECTION_NAME in existing_names:
         return
@@ -96,17 +83,8 @@ def _ensure_collection() -> None:
     )
 
 
-def index_document(
-    document_id: str,
-    text: str,
-) -> int:
-    """
-    Chunk a document, create embeddings, and store the chunks in Qdrant.
-
-    Returns:
-        Number of chunks indexed.
-    """
-
+def index_document(document_id: str, text: str) -> int:
+    """Chunk a document, create embeddings, and store chunks in Qdrant."""
     if not document_id:
         raise ValueError("document_id is required")
 
@@ -114,18 +92,14 @@ def index_document(
         raise ValueError("Document text cannot be empty")
 
     _ensure_collection()
-
     chunks = chunk_text(text)
 
     if not chunks:
         return 0
 
     points = []
-
     for index, chunk in enumerate(chunks):
-
         vector = _get_embedding(chunk)
-
         points.append(
             PointStruct(
                 id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}_{index}")),
@@ -143,7 +117,7 @@ def index_document(
         points=points,
     )
 
-    return len(points)
+    return len(chunks)
 
 
 def search_document(
@@ -151,42 +125,48 @@ def search_document(
     question: str,
     limit: int = 5,
 ) -> List[Dict[str, Any]]:
-    """
-    Search Qdrant for the most relevant chunks belonging
-    to a specific document.
-    """
-
-    if not document_id:
-        raise ValueError("document_id is required")
-
-    if not question:
-        raise ValueError("question is required")
-
+    """Search for relevant document chunks using vector similarity."""
     _ensure_collection()
-
     question_vector = _get_embedding(question)
 
-    results = qdrant_client.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=question_vector,
-        query_filter={
-            "must": [
-                {
-                    "key": "document_id",
-                    "match": {
-                        "value": document_id
-                    },
-                }
-            ]
-        },
-        limit=limit,
+    query_filter = Filter(
+        must=[
+            FieldCondition(
+                key="document_id",
+                match=MatchValue(value=document_id),
+            )
+        ]
     )
 
-    return [
-        {
-            "text": result.payload.get("text", ""),
-            "score": float(result.score),
-            "chunk_index": result.payload.get("chunk_index"),
-        }
-        for result in results
-    ]
+    # Use query_points (qdrant-client >= 1.10.0) with fallback to search
+    if hasattr(qdrant_client, "query_points"):
+        response = qdrant_client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=question_vector,
+            query_filter=query_filter,
+            limit=limit,
+        )
+        points = response.points
+        return [
+            {
+                "text": point.payload.get("text", "") if point.payload else "",
+                "score": float(point.score),
+                "chunk_index": point.payload.get("chunk_index", 0) if point.payload else 0,
+            }
+            for point in points
+        ]
+    else:
+        results = qdrant_client.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=question_vector,
+            query_filter=query_filter,
+            limit=limit,
+        )
+        return [
+            {
+                "text": result.payload.get("text", "") if result.payload else "",
+                "score": float(result.score),
+                "chunk_index": result.payload.get("chunk_index", 0) if result.payload else 0,
+            }
+            for result in results
+        ]
